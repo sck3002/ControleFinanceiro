@@ -490,6 +490,18 @@ function valorTotalInvestido(){
   return total;
 }
 
+function totaisInvestimentos(){
+  let aportado = 0, atual = 0;
+  for(const inv of state.investimentos){
+    const aportesInv = state.aportes.filter(a=>a.investimento_id===inv.id);
+    if(aportesInv.length===0) continue;
+    const ultimo = aportesInv.sort((a,b)=>a.data.localeCompare(b.data))[aportesInv.length-1];
+    aportado += aportesInv.reduce((a,x)=>a+Number(x.valor_aportado),0);
+    atual += Number(ultimo.valor_atual != null ? ultimo.valor_atual : ultimo.valor_aportado);
+  }
+  return { aportado: round2(aportado), atual: round2(atual), ganho: round2(atual - aportado) };
+}
+
 /* ============================================================
    ROTEAMENTO / RENDER
 ============================================================ */
@@ -811,11 +823,12 @@ function renderInicio(){
 
   html += renderPendencias();
 
-  const investido = valorTotalInvestido();
+  const ti = totaisInvestimentos();
   const faturasAbertas = state.faturas.filter(f=>f.status!=='paga');
   html += `<div class="card compact">
     <h2 class="section-title">Resumo</h2>
-    <div class="summary-row"><span>Investido atualmente</span><span>${formatMoeda(investido)}</span></div>
+    <div class="summary-row"><span>Investido atualmente</span><span>${formatMoeda(ti.atual)}</span></div>
+    <div class="summary-row"><span>Rendimento dos investimentos</span><span style="color:${ti.ganho>=0?'var(--entrada)':'var(--saida)'}">${ti.ganho>=0?'+':''} ${formatMoeda(ti.ganho)}</span></div>
     <div class="summary-row"><span>Faturas de cartão em aberto</span><span>${formatMoeda(faturasAbertas.reduce((a,f)=>a+Number(f.valor_total),0))}</span></div>
   </div>`;
 
@@ -1233,22 +1246,30 @@ function abrirModalFatura(faturaId){
    TELA: INVESTIMENTOS
 ============================================================ */
 function renderInvestimentos(){
+  const ti = totaisInvestimentos();
+  const percGeral = ti.aportado>0 ? (ti.ganho/ti.aportado*100) : null;
   let html = `<div class="card compact">
     <h2 class="section-title">Total investido<small>Soma do último valor informado de cada investimento</small></h2>
-    <div class="balance-card total" style="margin-top:6px;"><div class="label">Total</div><div class="value">${formatMoeda(valorTotalInvestido())}</div></div>
+    <div class="balance-card total" style="margin-top:6px;"><div class="label">Valor atual total</div><div class="value">${formatMoeda(ti.atual)}</div></div>
+    <div class="summary-row"><span>Total aportado</span><span>${formatMoeda(ti.aportado)}</span></div>
+    <div class="summary-row bold"><span>Rendimento total</span><span style="color:${ti.ganho>=0?'var(--entrada)':'var(--saida)'}">${ti.ganho>=0?'+':''} ${formatMoeda(ti.ganho)}${percGeral===null?'':` (${percGeral>=0?'+':''}${percGeral.toFixed(2).replace('.',',')}%)`}</span></div>
   </div>`;
 
   if(state.investimentos.length===0){
-    html += `<div class="card"><div class="empty">Nenhum investimento cadastrado.</div></div>`;
+    html += `<div class="card"><div class="empty">Nenhum investimento cadastrado.<br>Toque em "+ Novo investimento" e depois em "+ Aporte / atualizar valor" para informar o valor atual de cada um.</div></div>`;
   }
   for(const inv of state.investimentos){
     const aportesInv = state.aportes.filter(a=>a.investimento_id===inv.id).sort((a,b)=>b.data.localeCompare(a.data));
     const ultimo = aportesInv[0];
     const totalAportado = aportesInv.reduce((a,x)=>a+Number(x.valor_aportado),0);
+    const valorAtual = ultimo ? Number(ultimo.valor_atual!=null?ultimo.valor_atual:ultimo.valor_aportado) : 0;
+    const ganho = round2(valorAtual - totalAportado);
+    const perc = totalAportado>0 ? (ganho/totalAportado*100) : null;
     html += `<div class="card">
       <h2 class="section-title">${escHtml(inv.nome)}<small>${inv.tipo?escHtml(inv.tipo):'Investimento'}</small></h2>
       <div class="summary-row"><span>Total aportado</span><span>${formatMoeda(totalAportado)}</span></div>
-      <div class="summary-row bold"><span>Valor atual</span><span>${formatMoeda(ultimo ? (ultimo.valor_atual!=null?ultimo.valor_atual:ultimo.valor_aportado) : 0)}</span></div>
+      <div class="summary-row"><span>Valor atual</span><span>${formatMoeda(valorAtual)}</span></div>
+      <div class="summary-row bold"><span>Rendimento</span><span style="color:${ganho>=0?'var(--entrada)':'var(--saida)'}">${ganho>=0?'+':''} ${formatMoeda(ganho)}${perc===null?'':` (${perc>=0?'+':''}${perc.toFixed(2).replace('.',',')}%)`}</span></div>
       <div class="btn-row">
         <button class="btn secondary small" data-action="novo-aporte" data-id="${inv.id}">+ Aporte / atualizar valor</button>
         <button class="btn ghost small" data-action="editar-investimento" data-id="${inv.id}">Editar</button>
