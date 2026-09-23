@@ -1647,6 +1647,7 @@ function renderConfig(){
   </div>
   <div class="card">
     <button class="btn ghost" id="btnSair">Sair da conta</button>
+    <button class="btn danger" id="btnExcluirConta" style="margin-top:10px;">Excluir minha conta</button>
   </div>`;
 }
 function afterRenderConfig(){
@@ -1688,6 +1689,47 @@ function afterRenderConfig(){
     state = {...state, session:null, orgId:null, orgNome:'', contas:[], categorias:[], lancamentos:[], cartoes:[], faturas:[], compras:[], parcelasCartao:[], investimentos:[], aportes:[], compromissos:[], parcelasCompromisso:[], tab:'inicio'};
     render();
   });
+  document.getElementById('btnExcluirConta').addEventListener('click', abrirModalExcluirConta);
+}
+function abrirModalExcluirConta(){
+  document.getElementById('modalRoot').innerHTML = `<div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+      <h3>Excluir minha conta</h3>
+      <p class="note">Isso apaga para sempre seu login e todos os seus dados: contas, lançamentos, cartões, faturas, investimentos e compromissos. Não tem como desfazer depois. Você pode se cadastrar de novo com o mesmo e-mail no futuro, mas começando do zero.</p>
+      <label>Digite EXCLUIR para confirmar</label>
+      <input type="text" id="inputConfirmaExclusao" placeholder="EXCLUIR">
+      <button class="btn danger" id="btnConfirmarExclusao">Excluir definitivamente</button>
+      <button class="btn ghost" id="btnCancelarExclusao">Cancelar</button>
+    </div>
+  </div>`;
+  document.getElementById('modalOverlay').addEventListener('click', (e)=>{ if(e.target.id==='modalOverlay') fecharModal(); });
+  document.getElementById('btnCancelarExclusao').addEventListener('click', fecharModal);
+  document.getElementById('btnConfirmarExclusao').addEventListener('click', async ()=>{
+    const val = document.getElementById('inputConfirmaExclusao').value.trim();
+    if(val !== 'EXCLUIR'){ showToast('Digite EXCLUIR (maiúsculo) para confirmar.'); return; }
+    fecharModal();
+    await excluirMinhaConta();
+  });
+}
+async function excluirMinhaConta(){
+  showToast('Excluindo sua conta...');
+  try{
+    const token = state.session.access_token;
+    const resp = await fetch(`${SUPABASE_URL}/functions/v1/excluir-conta`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
+    });
+    const json = await resp.json().catch(()=>({}));
+    if(!resp.ok || json.error){
+      showToast('Erro ao excluir: ' + (json.error || resp.status));
+      return;
+    }
+    showToast('Conta excluída. Até logo!');
+    setTimeout(()=>{ window.location.reload(); }, 1400);
+  }catch(e){
+    console.error(e);
+    showToast('Erro de conexão ao excluir a conta.');
+  }
 }
 
 /* ============================================================
