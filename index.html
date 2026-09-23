@@ -184,6 +184,7 @@ table.report tr.saldo-row td{font-weight:700;background:#FBF8F0;}
   table.report{font-size:.85rem;}
 }
 </style>
+<base target="_blank">
 </head>
 <body>
 <div id="app">
@@ -385,7 +386,12 @@ async function dbAdd(table, obj){
   return data;
 }
 async function dbPut(table, obj){
-  const { data, error } = await sbClient.from(table).upsert(obj, {onConflict:'id'}).select().single();
+  const { id, ...fields } = obj;
+  if(!id){
+    showToast('Erro: registro sem identificador.');
+    throw new Error('dbPut sem id');
+  }
+  const { data, error } = await sbClient.from(table).update(fields).eq('id', id).select().single();
   if(error){
     console.error(table, error);
     showToast('Erro ao atualizar.');
