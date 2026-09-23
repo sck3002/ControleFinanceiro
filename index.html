@@ -837,6 +837,11 @@ function renderInicio(){
     <div class="chart-wrap"><canvas id="chartFluxo"></canvas></div>
   </div>`;
 
+  html += `<div class="card compact">
+    <h2 class="section-title">Gastos por categoria<small>${nomeMesAno(firstDayOfMonthISO())} · inclui compras no cartão</small></h2>
+    <div class="chart-wrap"><canvas id="chartGastosCategoria"></canvas></div>
+  </div>`;
+
   const recentes = state.lancamentos.slice(0,8);
   html += `<div class="card">
     <h2 class="section-title">Lançamentos recentes</h2>`;
@@ -884,6 +889,40 @@ function renderizarChartFluxo(){
       {label:'Despesas', data:despesas, backgroundColor:'#A6432F'},
     ]},
     options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{font:{size:10}}}}, scales:{y:{beginAtZero:true, ticks:{font:{size:9}}}, x:{ticks:{font:{size:9}}}} }
+  });
+}
+function gastosPorCategoriaMesAtual(){
+  const mesAtual = todayISO().slice(0,7);
+  const totais = {};
+  for(const l of state.lancamentos){
+    if(l.tipo!=='despesa') continue;
+    if(l.data.slice(0,7)!==mesAtual) continue;
+    const nome = categoriaNome(l.categoria_id);
+    totais[nome] = round2((totais[nome]||0) + Number(l.valor));
+  }
+  for(const c of state.compras){
+    if((c.data_compra||'').slice(0,7)!==mesAtual) continue;
+    const nome = categoriaNome(c.categoria_id);
+    totais[nome] = round2((totais[nome]||0) + Number(c.valor_total));
+  }
+  return totais;
+}
+let chartGastosCategoriaInstance = null;
+function renderizarChartGastosCategoria(){
+  const canvas = document.getElementById('chartGastosCategoria');
+  if(!canvas) return;
+  const totais = gastosPorCategoriaMesAtual();
+  const labels = Object.keys(totais);
+  const valores = Object.values(totais);
+  if(chartGastosCategoriaInstance) chartGastosCategoriaInstance.destroy();
+  if(labels.length===0){
+    canvas.parentElement.innerHTML = '<div class="empty">Nenhum gasto neste mês ainda.</div>';
+    return;
+  }
+  chartGastosCategoriaInstance = new Chart(canvas, {
+    type:'doughnut',
+    data:{labels, datasets:[{data:valores, backgroundColor:['#F04438','#2FD495','#15193B','#3550A0','#707686','#F0A438','#12B76A','#8C5E9E']}]},
+    options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom', labels:{font:{size:9}}}}}
   });
 }
 
@@ -1045,11 +1084,22 @@ function fecharModal(){
 /* ============================================================
    TELA: CARTÕES DE CRÉDITO
 ============================================================ */
+function ultimoDiaUtilDoMes(ano, mesIndex0){
+  const d = new Date(ano, mesIndex0+1, 0);
+  const dow = d.getDay();
+  if(dow===0) d.setDate(d.getDate()-2);
+  else if(dow===6) d.setDate(d.getDate()-1);
+  return d;
+}
+function dataFechamentoDoMes(cartao, ano, mesIndex0){
+  return cartao.fechamento_ultimo_dia_util ? ultimoDiaUtilDoMes(ano, mesIndex0) : new Date(ano, mesIndex0, cartao.dia_fechamento);
+}
 function calcularMesFatura(cartao, dataCompraISO, offsetParcelas){
   const d = new Date(dataCompraISO+'T00:00:00');
   let mes = d.getMonth();
   let ano = d.getFullYear();
-  if(d.getDate() > cartao.dia_fechamento) mes += 1;
+  const fechamentoDoMes = dataFechamentoDoMes(cartao, ano, mes);
+  if(d > fechamentoDoMes) mes += 1;
   mes += offsetParcelas;
   const ref = new Date(ano, mes, 1);
   return `${ref.getFullYear()}-${String(ref.getMonth()+1).padStart(2,'0')}-01`;
@@ -1058,9 +1108,9 @@ async function garantirFatura(cartao, mesReferencia){
   let fatura = state.faturas.find(f=>f.cartao_id===cartao.id && f.mes_referencia===mesReferencia);
   if(fatura) return fatura;
   const [y,m] = mesReferencia.split('-').map(Number);
-  const fechamento = new Date(y, m-1, cartao.dia_fechamento);
+  const fechamento = dataFechamentoDoMes(cartao, y, m-1);
   let vencimento = new Date(y, m-1, cartao.dia_vencimento);
-  if(cartao.dia_vencimento <= cartao.dia_fechamento) vencimento = new Date(y, m, cartao.dia_vencimento);
+  if(cartao.dia_vencimento <= fechamento.getDate()) vencimento = new Date(y, m, cartao.dia_vencimento);
   fatura = await dbAdd('faturas_cartao', {
     cartao_id: cartao.id, mes_referencia: mesReferencia,
     data_fechamento: isoFromDate(fechamento), data_vencimento: isoFromDate(vencimento),
@@ -1076,8 +1126,9 @@ function renderCartoes(){
   }
   for(const cartao of state.cartoes){
     const faturasCartao = state.faturas.filter(f=>f.cartao_id===cartao.id).sort((a,b)=>b.mes_referencia.localeCompare(a.mes_referencia)).slice(0,3);
+    const textoFechamento = cartao.fechamento_ultimo_dia_util ? 'no último dia útil do mês' : `dia ${cartao.dia_fechamento}`;
     html += `<div class="card">
-      <h2 class="section-title">${escHtml(cartao.nome)}<small>Fecha dia ${cartao.dia_fechamento} · vence dia ${cartao.dia_vencimento}${cartao.limite?' · limite '+formatMoeda(cartao.limite):''}</small></h2>`;
+      <h2 class="section-title">${escHtml(cartao.nome)}<small>Fecha ${textoFechamento} · vence dia ${cartao.dia_vencimento}${cartao.limite?' · limite '+formatMoeda(cartao.limite):''}</small></h2>`;
     if(faturasCartao.length===0){
       html += `<div class="empty">Nenhuma fatura ainda.</div>`;
     } else {
@@ -1107,6 +1158,7 @@ function afterRenderCartoes(){
 }
 function abrirModalCartao(id){
   const cartao = id ? state.cartoes.find(c=>c.id===id) : null;
+  const ultimoDiaUtil = cartao ? !!cartao.fechamento_ultimo_dia_util : false;
   document.getElementById('modalRoot').innerHTML = `<div class="modal-overlay" id="modalOverlay">
     <div class="modal">
       <h3>${cartao?'Editar cartão':'Novo cartão'}</h3>
@@ -1115,8 +1167,11 @@ function abrirModalCartao(id){
         <input type="text" name="nome" required value="${cartao?escHtml(cartao.nome):''}">
         <label>Limite (opcional)</label>
         <input type="text" name="limite" inputmode="decimal" value="${cartao&&cartao.limite?String(cartao.limite).replace('.',','):''}">
-        <label>Dia de fechamento</label>
-        <input type="number" name="fechamento" min="1" max="28" required value="${cartao?cartao.dia_fechamento:''}">
+        <label class="chip" style="margin-top:10px;"><input type="checkbox" id="chkUltimoDiaUtil" name="ultimoDiaUtil" ${ultimoDiaUtil?'checked':''}><span>Fecha no último dia útil do mês</span></label>
+        <div id="campoFechamentoNumero" style="display:${ultimoDiaUtil?'none':'block'};">
+          <label>Dia de fechamento</label>
+          <input type="number" name="fechamento" min="1" max="28" value="${cartao&&cartao.dia_fechamento?cartao.dia_fechamento:''}">
+        </div>
         <label>Dia de vencimento</label>
         <input type="number" name="vencimento" min="1" max="28" required value="${cartao?cartao.dia_vencimento:''}">
         <div class="btn-row">
@@ -1127,13 +1182,19 @@ function abrirModalCartao(id){
     </div>
   </div>`;
   document.getElementById('modalOverlay').addEventListener('click', (e)=>{ if(e.target.id==='modalOverlay') fecharModal(); });
+  document.getElementById('chkUltimoDiaUtil').addEventListener('change', (e)=>{
+    document.getElementById('campoFechamentoNumero').style.display = e.target.checked ? 'none' : 'block';
+  });
   document.getElementById('formCartao').addEventListener('submit', async (e)=>{
     e.preventDefault();
     const fd = new FormData(e.target);
+    const usaUltimoDiaUtil = document.getElementById('chkUltimoDiaUtil').checked;
+    if(!usaUltimoDiaUtil && !fd.get('fechamento')){ showToast('Informe o dia de fechamento ou marque "último dia útil".'); return; }
     const obj = {
       nome: fd.get('nome'),
       limite: fd.get('limite') ? parseValor(fd.get('limite')) : null,
-      dia_fechamento: Number(fd.get('fechamento')),
+      fechamento_ultimo_dia_util: usaUltimoDiaUtil,
+      dia_fechamento: usaUltimoDiaUtil ? null : Number(fd.get('fechamento')),
       dia_vencimento: Number(fd.get('vencimento')),
     };
     if(cartao){ obj.id = cartao.id; await dbPut('cartoes_credito', obj); }
@@ -1150,24 +1211,40 @@ function abrirModalCartao(id){
     });
   }
 }
-function abrirModalCompraCartao(cartaoId){
+async function removerParcelasDaCompra(compraId){
+  const parcelasDaCompra = state.parcelasCartao.filter(p=>p.compra_id===compraId);
+  for(const p of parcelasDaCompra){
+    const fatura = state.faturas.find(f=>f.id===p.fatura_id);
+    if(fatura){
+      const novoTotal = round2(Number(fatura.valor_total) - Number(p.valor_parcela));
+      await dbPut('faturas_cartao', {id: fatura.id, valor_total: novoTotal});
+    }
+    await dbDelete('parcelas_cartao', p.id);
+  }
+}
+function abrirModalCompraCartao(cartaoId, compraId){
   const cartao = state.cartoes.find(c=>c.id===cartaoId);
+  const compraExistente = compraId ? state.compras.find(c=>c.id===compraId) : null;
   const categoriasDespesa = state.categorias.filter(c=>c.tipo==='despesa');
   document.getElementById('modalRoot').innerHTML = `<div class="modal-overlay" id="modalOverlay">
     <div class="modal">
-      <h3>Nova compra — ${escHtml(cartao.nome)}</h3>
+      <h3>${compraExistente?'Editar compra':'Nova compra'} — ${escHtml(cartao.nome)}</h3>
       <form id="formCompraCartao">
         <label>Descrição</label>
-        <input type="text" name="descricao" required>
+        <input type="text" name="descricao" required value="${compraExistente?escHtml(compraExistente.descricao):''}">
         <label>Categoria</label>
-        <select name="categoria">${categoriasDespesa.map(c=>`<option value="${c.id}">${escHtml(c.nome)}</option>`).join('')}</select>
+        <select name="categoria">${categoriasDespesa.map(c=>`<option value="${c.id}" ${compraExistente&&compraExistente.categoria_id===c.id?'selected':''}>${escHtml(c.nome)}</option>`).join('')}</select>
         <label>Valor total</label>
-        <input type="text" name="valor" inputmode="decimal" required placeholder="0,00">
+        <input type="text" name="valor" inputmode="decimal" required placeholder="0,00" value="${compraExistente?String(compraExistente.valor_total).replace('.',','):''}">
         <label>Data da compra</label>
-        <input type="date" name="data" value="${todayISO()}" required>
+        <input type="date" name="data" value="${compraExistente?compraExistente.data_compra:todayISO()}" required>
         <label>Parcelas</label>
-        <input type="number" name="parcelas" min="1" value="1" required>
-        <button type="submit" class="btn">Salvar compra</button>
+        <input type="number" name="parcelas" min="1" value="${compraExistente?compraExistente.parcelas_total:1}" required>
+        ${compraExistente ? '<p class="note">Editar recalcula as parcelas e os valores das faturas envolvidas.</p>' : ''}
+        <div class="btn-row">
+          ${compraExistente?'<button type="button" class="btn danger" id="btnExcluirCompra">Excluir</button>':''}
+          <button type="submit" class="btn">${compraExistente?'Salvar alterações':'Salvar compra'}</button>
+        </div>
       </form>
     </div>
   </div>`;
@@ -1180,11 +1257,21 @@ function abrirModalCompraCartao(cartaoId){
     const dataCompra = fd.get('data');
     if(valorTotal<=0 || numParcelas<1){ showToast('Confira os valores.'); return; }
 
-    const compra = await dbAdd('compras_cartao', {
-      cartao_id: cartaoId, categoria_id: fd.get('categoria') || null,
-      descricao: fd.get('descricao'), valor_total: valorTotal,
-      parcelas_total: numParcelas, data_compra: dataCompra
-    });
+    let compra;
+    if(compraExistente){
+      await removerParcelasDaCompra(compraExistente.id);
+      compra = await dbPut('compras_cartao', {
+        id: compraExistente.id, cartao_id: cartaoId, categoria_id: fd.get('categoria') || null,
+        descricao: fd.get('descricao'), valor_total: valorTotal,
+        parcelas_total: numParcelas, data_compra: dataCompra
+      });
+    } else {
+      compra = await dbAdd('compras_cartao', {
+        cartao_id: cartaoId, categoria_id: fd.get('categoria') || null,
+        descricao: fd.get('descricao'), valor_total: valorTotal,
+        parcelas_total: numParcelas, data_compra: dataCompra
+      });
+    }
 
     const valorParcelaBase = round2(valorTotal/numParcelas);
     let somaAcumulada = 0;
@@ -1198,8 +1285,17 @@ function abrirModalCompraCartao(cartaoId){
       fatura.valor_total = round2(Number(fatura.valor_total)+valorParcela);
     }
     await loadAll();
-    fecharModal(); render(); showToast('Compra registrada.');
+    fecharModal(); render(); showToast(compraExistente?'Compra atualizada.':'Compra registrada.');
   });
+  if(compraExistente){
+    document.getElementById('btnExcluirCompra').addEventListener('click', async ()=>{
+      if(!confirm('Excluir esta compra e todas as suas parcelas?')) return;
+      await removerParcelasDaCompra(compraExistente.id);
+      await dbDelete('compras_cartao', compraExistente.id);
+      await loadAll();
+      fecharModal(); render(); showToast('Compra excluída.');
+    });
+  }
 }
 function abrirModalFatura(faturaId){
   const fatura = state.faturas.find(f=>f.id===faturaId);
@@ -1208,7 +1304,8 @@ function abrirModalFatura(faturaId){
   let itensHtml = '';
   for(const p of parcelas){
     const compra = state.compras.find(c=>c.id===p.compra_id);
-    itensHtml += `<div class="summary-row"><span>${escHtml(compra?compra.descricao:'')} (${p.numero_parcela}/${compra?compra.parcelas_total:''})</span><span>${formatMoeda(p.valor_parcela)}</span></div>`;
+    const clique = (fatura.status!=='paga' && compra) ? ` data-action="editar-compra" data-id="${compra.id}" style="cursor:pointer;"` : '';
+    itensHtml += `<div class="summary-row"${clique}><span>${escHtml(compra?compra.descricao:'')} (${p.numero_parcela}/${compra?compra.parcelas_total:''})</span><span>${formatMoeda(p.valor_parcela)}</span></div>`;
   }
   document.getElementById('modalRoot').innerHTML = `<div class="modal-overlay" id="modalOverlay">
     <div class="modal">
@@ -1223,6 +1320,9 @@ function abrirModalFatura(faturaId){
     </div>
   </div>`;
   document.getElementById('modalOverlay').addEventListener('click', (e)=>{ if(e.target.id==='modalOverlay') fecharModal(); });
+  document.querySelectorAll('[data-action="editar-compra"]').forEach(el=>{
+    el.addEventListener('click', ()=>abrirModalCompraCartao(cartao.id, el.dataset.id));
+  });
   const btnPagar = document.getElementById('btnPagarFatura');
   if(btnPagar){
     btnPagar.addEventListener('click', async ()=>{
@@ -1764,7 +1864,7 @@ async function excluirMinhaConta(){
 ============================================================ */
 function afterRender(){
   switch(state.tab){
-    case 'inicio': renderizarChartFluxo(); break;
+    case 'inicio': renderizarChartFluxo(); renderizarChartGastosCategoria(); break;
     case 'lancar': afterRenderLancar(); break;
     case 'cartoes': afterRenderCartoes(); break;
     case 'relatorios': afterRenderRelatorios(); break;
