@@ -185,6 +185,7 @@ table.report tr.saldo-row td{font-weight:700;background:#FBF8F0;}
 }
 </style>
 <base target="_blank">
+<base target="_blank">
 </head>
 <body>
 <div id="app">
@@ -824,12 +825,18 @@ function renderInicio(){
   html += renderPendencias();
 
   const ti = totaisInvestimentos();
-  const faturasAbertas = state.faturas.filter(f=>f.status!=='paga');
+  const faturasEmAberto = state.faturas
+    .filter(f=>f.status!=='paga')
+    .sort((a,b)=>a.data_vencimento.localeCompare(b.data_vencimento));
+  const proximaFatura = faturasEmAberto[0] || null;
+  const rotuloProxima = proximaFatura
+    ? `Próxima fatura (${escHtml(cartaoNome(proximaFatura.cartao_id))} · vence ${formatDataBR(proximaFatura.data_vencimento)})`
+    : 'Próxima fatura a vencer';
   html += `<div class="card compact">
     <h2 class="section-title">Resumo</h2>
     <div class="summary-row"><span>Investido atualmente</span><span>${formatMoeda(ti.atual)}</span></div>
     <div class="summary-row"><span>Rendimento dos investimentos</span><span style="color:${ti.ganho>=0?'var(--entrada)':'var(--saida)'}">${ti.ganho>=0?'+':''} ${formatMoeda(ti.ganho)}</span></div>
-    <div class="summary-row"><span>Faturas de cartão em aberto</span><span>${formatMoeda(faturasAbertas.reduce((a,f)=>a+Number(f.valor_total),0))}</span></div>
+    <div class="summary-row"><span>${rotuloProxima}</span><span>${proximaFatura?formatMoeda(proximaFatura.valor_total):'—'}</span></div>
   </div>`;
 
   html += `<div class="card compact">
@@ -1211,15 +1218,26 @@ function abrirModalCartao(id){
     });
   }
 }
+async function recalcularTotalFatura(faturaId){
+  const total = round2(state.parcelasCartao
+    .filter(p=>p.fatura_id===faturaId)
+    .reduce((a,p)=>a+Number(p.valor_parcela),0));
+  const fatura = state.faturas.find(f=>f.id===faturaId);
+  if(fatura){
+    await dbPut('faturas_cartao', {id: faturaId, valor_total: total});
+    fatura.valor_total = total;
+  }
+  return total;
+}
 async function removerParcelasDaCompra(compraId){
   const parcelasDaCompra = state.parcelasCartao.filter(p=>p.compra_id===compraId);
+  const faturasAfetadas = [...new Set(parcelasDaCompra.map(p=>p.fatura_id))];
   for(const p of parcelasDaCompra){
-    const fatura = state.faturas.find(f=>f.id===p.fatura_id);
-    if(fatura){
-      const novoTotal = round2(Number(fatura.valor_total) - Number(p.valor_parcela));
-      await dbPut('faturas_cartao', {id: fatura.id, valor_total: novoTotal});
-    }
     await dbDelete('parcelas_cartao', p.id);
+  }
+  state.parcelasCartao = state.parcelasCartao.filter(p=>p.compra_id!==compraId);
+  for(const fid of faturasAfetadas){
+    await recalcularTotalFatura(fid);
   }
 }
 function abrirModalCompraCartao(cartaoId, compraId){
@@ -1275,14 +1293,18 @@ function abrirModalCompraCartao(cartaoId, compraId){
 
     const valorParcelaBase = round2(valorTotal/numParcelas);
     let somaAcumulada = 0;
+    const faturasAfetadas = new Set();
     for(let i=1;i<=numParcelas;i++){
       const mesRef = calcularMesFatura(cartao, dataCompra, i-1);
       const fatura = await garantirFatura(cartao, mesRef);
       const valorParcela = i===numParcelas ? round2(valorTotal - somaAcumulada) : valorParcelaBase;
       somaAcumulada += valorParcela;
-      await dbAdd('parcelas_cartao', {compra_id: compra.id, fatura_id: fatura.id, numero_parcela:i, valor_parcela: valorParcela, status:'pendente'});
-      await dbPut('faturas_cartao', {id: fatura.id, valor_total: round2(Number(fatura.valor_total)+valorParcela)});
-      fatura.valor_total = round2(Number(fatura.valor_total)+valorParcela);
+      const parcela = await dbAdd('parcelas_cartao', {compra_id: compra.id, fatura_id: fatura.id, numero_parcela:i, valor_parcela: valorParcela, status:'pendente'});
+      state.parcelasCartao.push(parcela);
+      faturasAfetadas.add(fatura.id);
+    }
+    for(const fid of faturasAfetadas){
+      await recalcularTotalFatura(fid);
     }
     await loadAll();
     fecharModal(); render(); showToast(compraExistente?'Compra atualizada.':'Compra registrada.');
