@@ -160,6 +160,17 @@ input:focus,select:focus,textarea:focus{outline:none;background:#fff;border-colo
 .fatura-mini .fm-n{font-size:.78rem;font-weight:600;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .fatura-mini .fm-d{font-size:.68rem;color:var(--ink-3);}
 .fatura-mini .fm-v{font-family:'Fraunces',serif;font-size:.84rem;font-weight:600;white-space:nowrap;}
+/* ---------- Navegação de fatura por mês ---------- */
+.mes-nav{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.mes-nav button{flex:none;width:42px;height:42px;border-radius:50%;border:1.5px solid var(--line);background:#fff;font-size:1.3rem;line-height:1;color:var(--ink-2);cursor:pointer;font-family:inherit;transition:transform .18s var(--ease),background .15s;}
+.mes-nav button:active{transform:scale(.92);}
+.mes-nav .mn-t{flex:1;text-align:center;min-width:0;}
+.mes-nav .mn-t .m{font-family:'Fraunces',Georgia,serif;font-size:1.08rem;font-weight:600;letter-spacing:-.01em;}
+.mes-nav .mn-t .s{font-size:.72rem;color:var(--ink-3);margin-top:5px;font-weight:500;}
+.fat-resumo{text-align:center;padding:18px 0 14px;border-bottom:1px solid var(--line);margin-bottom:4px;}
+.fat-resumo .fr-total{font-family:'Fraunces',Georgia,serif;font-size:1.9rem;font-weight:600;letter-spacing:-.02em;}
+.fat-resumo .fr-sub{font-size:.76rem;color:var(--ink-2);margin-top:4px;font-weight:500;}
+.hint-txt{font-size:.78rem;color:var(--ink-2);margin-top:10px;line-height:1.5;}
 
 /* ---------- Banner de ação ---------- */
 .action-banner{display:flex;align-items:center;gap:14px;background:linear-gradient(120deg,#FFF7E8,#FFF);border:1px solid rgba(217,142,30,.3);border-radius:var(--r-md);padding:16px;margin-bottom:16px;cursor:pointer;transition:transform .18s var(--ease);}
@@ -328,6 +339,9 @@ let state = {
   authMode: 'login',
   lancarTipo: 'receita',
   compromissoTipo: 'parcelado',
+  lancarForma: 'conta',
+  faturaCartaoId: null,
+  faturaMes: null,
   reportFilters: null,
   reportResult: null,
   onboardingSaldos: false,
@@ -922,7 +936,7 @@ function renderInicio(){
 
   /* Resumo limpo: dois blocos lado a lado */
   const faturasEmAberto = state.faturas
-    .filter(f=>f.status!=='paga')
+    .filter(f=>f.status!=='paga' && Number(f.valor_total)>0)
     .sort((a,b)=>a.data_vencimento.localeCompare(b.data_vencimento));
   const proximasFaturas = faturasEmAberto.slice(0,3);
   const percGeral = ti.aportado>0 ? (ti.ganho/ti.aportado*100) : null;
@@ -955,22 +969,38 @@ function renderInicio(){
   html += `</div>`;
 
   html += `<div class="card compact">
-    <h2 class="section-title">Receitas x Despesas<small>últimos 6 meses</small></h2>
+    <h2 class="section-title">Receitas x Despesas<small>últimos 6 meses · despesas incluem cartão</small></h2>
     <div class="chart-wrap tall"><canvas id="chartFluxo"></canvas></div>
   </div>`;
 
   html += `<div class="card compact">
-    <h2 class="section-title">Gastos por categoria<small>${nomeMesAno(firstDayOfMonthISO())} · inclui compras no cartão</small></h2>
+    <h2 class="section-title">Gastos por categoria<small>${nomeMesAno(firstDayOfMonthISO())} · inclui cartão, por parcela</small></h2>
     <div class="chart-wrap"><canvas id="chartGastosCategoria"></canvas></div>
   </div>`;
 
-  const recentes = state.lancamentos.slice(0,8);
+  const recentes = [
+    ...state.lancamentos.map(l=>({data:l.data, l})),
+    ...state.compras.map(c=>({data:c.data_compra, c}))
+  ].sort((a,b)=>b.data.localeCompare(a.data)).slice(0,8);
   html += `<div class="card">
     <h2 class="section-title">Lançamentos recentes</h2>`;
   if(recentes.length===0){
     html += `<div class="empty">Nenhum lançamento ainda.<br>Toque em "Lançar" para começar.</div>`;
   } else {
-    for(const l of recentes){
+    for(const r of recentes){
+      if(r.c){
+        const c = r.c;
+        html += `<div class="lancamento-item" data-action="editar-compra" data-cartao="${c.cartao_id}" data-id="${c.id}">
+          <span class="dot saida"></span>
+          <div class="info">
+            <div class="hist">${escHtml(c.descricao)}</div>
+            <div class="meta">${formatDataBR(c.data_compra)} · Cartão ${escHtml(cartaoNome(c.cartao_id))}${c.parcelas_total>1?` · ${c.parcelas_total}x`:''}</div>
+          </div>
+          <div class="valor saida">- ${formatMoeda(c.valor_total)}</div>
+        </div>`;
+        continue;
+      }
+      const l = r.l;
       const isSaida = l.tipo === 'despesa';
       html += `<div class="lancamento-item">
         <span class="dot ${isSaida?'saida':'entrada'}"></span>
@@ -986,17 +1016,55 @@ function renderInicio(){
   return html;
 }
 
+/* Parcelas do cartão como "despesas": cada parcela conta na data da compra + (n-1) meses.
+   O pagamento da fatura e as transferências entre contas ficam de fora para não duplicar. */
+function parcelasCartaoComoLancamentos(){
+  const compras = new Map(state.compras.map(c=>[c.id,c]));
+  const out = [];
+  for(const p of state.parcelasCartao){
+    const c = compras.get(p.compra_id);
+    if(!c) continue;
+    out.push({
+      id: p.id,
+      data: addMonthsISO(c.data_compra, Number(p.numero_parcela)-1),
+      descricao: c.descricao + (c.parcelas_total>1 ? ` (${p.numero_parcela}/${c.parcelas_total})` : ''),
+      categoria_id: c.categoria_id,
+      tipo: 'despesa',
+      valor: Number(p.valor_parcela),
+      conta_financeira_id: null,
+      _origem: `Cartão ${cartaoNome(c.cartao_id)}`
+    });
+  }
+  return out;
+}
+function origemLancamento(l){ return l._origem || contaNome(l.conta_financeira_id); }
+/* Pagamento de fatura: criado com transfer_group = id da fatura; os antigos são reconhecidos pela descrição */
+function ehPagamentoFatura(l){
+  if(l.tipo!=='despesa' || l.categoria_id) return false;
+  if(l.transfer_group) return state.faturas.some(f=>f.id===l.transfer_group);
+  return /^Fatura /.test(l.descricao||'');
+}
+function despesasConsolidadas(){
+  const out = [];
+  for(const l of state.lancamentos){
+    if(l.tipo!=='despesa' || l.transfer_group || ehPagamentoFatura(l)) continue;
+    out.push({data:l.data, valor:Number(l.valor), categoria_id:l.categoria_id});
+  }
+  for(const l of parcelasCartaoComoLancamentos()) out.push({data:l.data, valor:l.valor, categoria_id:l.categoria_id});
+  return out;
+}
 function montarDadosFluxo6Meses(){
   const labels = [];
   const receitas = [];
   const despesas = [];
+  const todasDespesas = despesasConsolidadas();
   for(let i=5;i>=0;i--){
     const ref = addMonthsISO(firstDayOfMonthISO(), -i);
     const [y,m] = ref.split('-');
+    const ym = `${y}-${m}`;
     labels.push(nomeMesCurto(ref));
-    const doMes = state.lancamentos.filter(l=>l.data.slice(0,7) === `${y}-${m}`);
-    receitas.push(round2(doMes.filter(l=>l.tipo==='receita').reduce((a,l)=>a+Number(l.valor),0)));
-    despesas.push(round2(doMes.filter(l=>l.tipo==='despesa').reduce((a,l)=>a+Number(l.valor),0)));
+    receitas.push(round2(state.lancamentos.filter(l=>l.tipo==='receita' && !l.transfer_group && l.data.slice(0,7)===ym).reduce((a,l)=>a+Number(l.valor),0)));
+    despesas.push(round2(todasDespesas.filter(d=>d.data.slice(0,7)===ym).reduce((a,d)=>a+d.valor,0)));
   }
   return {labels, receitas, despesas};
 }
@@ -1038,16 +1106,10 @@ function renderizarChartFluxo(){
 function gastosPorCategoriaMesAtual(){
   const mesAtual = todayISO().slice(0,7);
   const totais = {};
-  for(const l of state.lancamentos){
-    if(l.tipo!=='despesa') continue;
-    if(l.data.slice(0,7)!==mesAtual) continue;
-    const nome = categoriaNome(l.categoria_id);
-    totais[nome] = round2((totais[nome]||0) + Number(l.valor));
-  }
-  for(const c of state.compras){
-    if((c.data_compra||'').slice(0,7)!==mesAtual) continue;
-    const nome = categoriaNome(c.categoria_id);
-    totais[nome] = round2((totais[nome]||0) + Number(c.valor_total));
+  for(const d of despesasConsolidadas()){
+    if(d.data.slice(0,7)!==mesAtual) continue;
+    const nome = d.categoria_id ? categoriaNome(d.categoria_id) : 'Sem categoria';
+    totais[nome] = round2((totais[nome]||0) + d.valor);
   }
   return totais;
 }
@@ -1106,6 +1168,9 @@ function renderLancar(){
     <button class="btn" id="btnIrContasLancar">Ir para Contas</button></div>`;
   }
 
+  const permiteCartao = tipo==='despesa' && state.cartoes.length>0;
+  const noCartao = permiteCartao && state.lancarForma==='cartao';
+
   let camposEspecificos = '';
   if(tipo === 'transferencia'){
     camposEspecificos = `
@@ -1117,9 +1182,16 @@ function renderLancar(){
       </div>`;
   } else {
     camposEspecificos = `
+      ${permiteCartao ? `<label>Pago com</label>
+      <div class="segmented" id="segForma" style="margin-top:0;">
+        <button type="button" data-forma="conta" class="${noCartao?'':'active'}">Conta</button>
+        <button type="button" data-forma="cartao" class="${noCartao?'active':''}">Cartão de crédito</button>
+      </div>` : ''}
       <div class="filters-grid">
-        <div><label>Conta</label>
-        <select name="conta" required>${state.contas.map(c=>`<option value="${c.id}">${escHtml(c.nome)}</option>`).join('')}</select></div>
+        <div id="wrapConta" ${noCartao?'hidden':''}><label>Conta</label>
+        <select name="conta" required ${noCartao?'disabled':''}>${state.contas.map(c=>`<option value="${c.id}">${escHtml(c.nome)}</option>`).join('')}</select></div>
+        ${permiteCartao ? `<div id="wrapCartao" ${noCartao?'':'hidden'}><label>Cartão</label>
+        <select name="cartao" required ${noCartao?'':'disabled'}>${state.cartoes.map(c=>`<option value="${c.id}" ${c.id===state.faturaCartaoId?'selected':''}>${escHtml(c.nome)}</option>`).join('')}</select></div>` : ''}
         <div><label>Categoria</label>
         <select name="categoria" required>${categoriasFiltradas.map(c=>`<option value="${c.id}">${escHtml(c.nome)}</option>`).join('')}</select></div>
       </div>`;
@@ -1134,11 +1206,16 @@ function renderLancar(){
     <form id="formLancar">
       ${camposEspecificos}
       <div class="filters-grid">
-        <div><label>Valor</label>
+        <div><label id="lblValor">${noCartao?'Valor total':'Valor'}</label>
         <input type="text" name="valor" inputmode="decimal" placeholder="0,00" required></div>
         <div><label>Data</label>
         <input type="date" name="data" value="${todayISO()}" required></div>
       </div>
+      ${permiteCartao ? `<div id="wrapParcelas" ${noCartao?'':'hidden'}>
+        <label>Parcelas</label>
+        <input type="number" name="parcelas" min="1" max="72" value="1" inputmode="numeric" ${noCartao?'':'disabled'}>
+        <p class="hint-txt" id="hintFatura"></p>
+      </div>` : ''}
       <label>Descrição (opcional)</label>
       <input type="text" name="descricao" placeholder="Ex: mercado, salário...">
       <button type="submit" class="btn">Salvar lançamento</button>
@@ -1156,6 +1233,34 @@ function afterRenderLancar(){
   });
   const form = document.getElementById('formLancar');
   if(!form) return;
+
+  /* Forma de pagamento: alterna conta x cartão sem re-renderizar (não perde o que já foi digitado) */
+  const segForma = document.getElementById('segForma');
+  const atualizarHint = ()=>{
+    const el = document.getElementById('hintFatura');
+    if(!el) return;
+    if(state.lancarForma!=='cartao'){ el.textContent=''; return; }
+    const fd = new FormData(form);
+    const c = state.cartoes.find(x=>x.id===fd.get('cartao'));
+    el.textContent = infoFaturaDaCompra(c, fd.get('data'), Math.max(1, parseInt(fd.get('parcelas'),10)||1), parseValor(fd.get('valor')));
+  };
+  if(segForma){
+    const aplicarForma = ()=>{
+      const card = state.lancarForma==='cartao';
+      const mostrar = (id, show)=>{ const el=document.getElementById(id); if(el) el.hidden=!show; };
+      mostrar('wrapConta', !card); mostrar('wrapCartao', card); mostrar('wrapParcelas', card);
+      const desab = (nome, d)=>{ const el=form.elements[nome]; if(el) el.disabled=d; };
+      desab('conta', card); desab('cartao', !card); desab('parcelas', !card);
+      segForma.querySelectorAll('[data-forma]').forEach(b=>b.classList.toggle('active', b.dataset.forma===(card?'cartao':'conta')));
+      document.getElementById('lblValor').textContent = card ? 'Valor total' : 'Valor';
+      atualizarHint();
+    };
+    segForma.querySelectorAll('[data-forma]').forEach(b=>b.addEventListener('click', ()=>{ state.lancarForma = b.dataset.forma; aplicarForma(); }));
+    form.addEventListener('input', atualizarHint);
+    form.addEventListener('change', atualizarHint);
+    atualizarHint();
+  }
+
   form.addEventListener('submit', async (e)=>{
     e.preventDefault();
     const fd = new FormData(form);
@@ -1163,6 +1268,24 @@ function afterRenderLancar(){
     const data = fd.get('data');
     const descricao = fd.get('descricao') || null;
     if(valor <= 0){ showToast('Informe um valor maior que zero.'); return; }
+
+    /* Despesa no cartão: vira compra + parcelas na fatura correspondente */
+    if(state.lancarTipo==='despesa' && state.lancarForma==='cartao' && state.cartoes.length>0){
+      const cartao = state.cartoes.find(c=>c.id===fd.get('cartao'));
+      if(!cartao){ showToast('Escolha um cartão.'); return; }
+      const numParcelas = Math.max(1, parseInt(fd.get('parcelas'),10)||1);
+      const categoriaId = fd.get('categoria') || null;
+      const res = await salvarCompraCartao({
+        cartao, compraExistente:null, descricao: descricao || categoriaNome(categoriaId),
+        valorTotal: valor, numParcelas, dataCompra: data, categoriaId
+      });
+      if(!res) return;
+      state.faturaCartaoId = cartao.id;
+      state.faturaMes = res.primeiraFatura;
+      showToast(`Compra lançada na fatura de ${nomeMesAno(res.primeiraFatura)}.`);
+      setTab('inicio');
+      return;
+    }
 
     if(state.lancarTipo === 'transferencia'){
       const origem = fd.get('contaOrigem');
@@ -1285,57 +1408,179 @@ function calcularMesFatura(cartao, dataCompraISO, offsetParcelas){
   const ref = new Date(ano, mes, 1);
   return `${ref.getFullYear()}-${String(ref.getMonth()+1).padStart(2,'0')}-01`;
 }
-async function garantirFatura(cartao, mesReferencia){
-  let fatura = state.faturas.find(f=>f.cartao_id===cartao.id && f.mes_referencia===mesReferencia);
-  if(fatura) return fatura;
+function datasDaFatura(cartao, mesReferencia){
   const [y,m] = mesReferencia.split('-').map(Number);
   const fechamento = dataFechamentoDoMes(cartao, y, m-1);
   let vencimento = new Date(y, m-1, cartao.dia_vencimento);
   if(cartao.dia_vencimento <= fechamento.getDate()) vencimento = new Date(y, m, cartao.dia_vencimento);
+  return {fechamento: isoFromDate(fechamento), vencimento: isoFromDate(vencimento)};
+}
+async function garantirFatura(cartao, mesReferencia){
+  let fatura = state.faturas.find(f=>f.cartao_id===cartao.id && f.mes_referencia===mesReferencia);
+  if(fatura) return fatura;
+  const datas = datasDaFatura(cartao, mesReferencia);
   fatura = await dbAdd('faturas_cartao', {
     cartao_id: cartao.id, mes_referencia: mesReferencia,
-    data_fechamento: isoFromDate(fechamento), data_vencimento: isoFromDate(vencimento),
+    data_fechamento: datas.fechamento, data_vencimento: datas.vencimento,
     valor_total: 0, status: 'aberta'
   });
   state.faturas.push(fatura);
   return fatura;
 }
+function mesFaturaAtual(cartao){ return calcularMesFatura(cartao, todayISO(), 0); }
+function faturaDoMes(cartaoId, mes){ return state.faturas.find(f=>f.cartao_id===cartaoId && f.mes_referencia===mes) || null; }
+/* Data sugerida para um lançamento que deve cair na fatura do mês informado (ciclo = fechamento anterior + 1 dia até o fechamento) */
+function dataPadraoNaFatura(cartao, mes){
+  const fim = datasDaFatura(cartao, mes).fechamento;
+  const inicio = addDaysISO(datasDaFatura(cartao, addMonthsISO(mes,-1)).fechamento, 1);
+  const hoje = todayISO();
+  return hoje < inicio ? inicio : (hoje > fim ? fim : hoje);
+}
+function infoFaturaDaCompra(cartao, dataISO, numParcelas, valorTotal){
+  if(!cartao || !dataISO) return '';
+  const mes = calcularMesFatura(cartao, dataISO, 0);
+  const venc = datasDaFatura(cartao, mes).vencimento;
+  let t = `Entra na fatura de ${nomeMesAno(mes)} · vence ${formatDataBR(venc)}`;
+  if(numParcelas>1){
+    const ult = calcularMesFatura(cartao, dataISO, numParcelas-1);
+    t += ` · ${numParcelas}x${valorTotal>0?` de ${formatMoeda(round2(valorTotal/numParcelas))}`:''} até ${nomeMesCurto(ult)}/${ult.slice(0,4)}`;
+  }
+  return t;
+}
+function totalDaFatura(fatura){
+  if(!fatura) return 0;
+  return round2(state.parcelasCartao.filter(p=>p.fatura_id===fatura.id).reduce((a,p)=>a+Number(p.valor_parcela),0));
+}
+function compraTravada(compraId){
+  return state.parcelasCartao.some(p=>{
+    if(p.compra_id!==compraId) return false;
+    const f = state.faturas.find(x=>x.id===p.fatura_id);
+    return f && f.status==='paga';
+  });
+}
+function irParaFatura(faturaId){
+  const f = state.faturas.find(x=>x.id===faturaId);
+  if(!f) return;
+  state.faturaCartaoId = f.cartao_id;
+  state.faturaMes = f.mes_referencia;
+  if(state.tab==='cartoes') render(); else setTab('cartoes');
+}
+function garantirSelecaoFatura(){
+  if(!state.cartoes.length) return null;
+  let cartao = state.cartoes.find(c=>c.id===state.faturaCartaoId);
+  if(!cartao){ cartao = state.cartoes[0]; state.faturaCartaoId = cartao.id; state.faturaMes = null; }
+  if(!state.faturaMes) state.faturaMes = mesFaturaAtual(cartao);
+  return cartao;
+}
+
 function renderCartoes(){
+  const cartao = garantirSelecaoFatura();
+  if(!cartao){
+    return `<div class="card"><div class="empty">Nenhum cartão cadastrado.</div></div>
+      <button class="btn secondary" id="btnNovoCartao">+ Novo cartão</button>`;
+  }
+  const mes = state.faturaMes;
+  const fatura = faturaDoMes(cartao.id, mes);
+  const datas = fatura ? {fechamento: fatura.data_fechamento, vencimento: fatura.data_vencimento} : datasDaFatura(cartao, mes);
+  const paga = !!fatura && fatura.status==='paga';
+  const status = paga ? 'paga' : (todayISO() > datas.fechamento ? 'fechada' : 'aberta');
+  const itens = (fatura ? state.parcelasCartao.filter(p=>p.fatura_id===fatura.id) : [])
+    .map(p=>({p, compra: state.compras.find(c=>c.id===p.compra_id)}))
+    .filter(x=>x.compra)
+    .sort((a,b)=>a.compra.data_compra.localeCompare(b.compra.data_compra));
+  const total = totalDaFatura(fatura);
+  const ehAtual = mes === mesFaturaAtual(cartao);
+
   let html = '';
-  if(state.cartoes.length===0){
-    html += `<div class="card"><div class="empty">Nenhum cartão cadastrado.</div></div>`;
+  if(state.cartoes.length>1){
+    html += `<div class="card compact" style="padding:14px 16px;">
+      <select id="selCartaoFatura" style="margin:0;">${state.cartoes.map(c=>`<option value="${c.id}" ${c.id===cartao.id?'selected':''}>${escHtml(c.nome)}</option>`).join('')}</select>
+    </div>`;
   }
-  for(const cartao of state.cartoes){
-    const faturasCartao = state.faturas.filter(f=>f.cartao_id===cartao.id).sort((a,b)=>b.mes_referencia.localeCompare(a.mes_referencia)).slice(0,3);
-    const textoFechamento = cartao.fechamento_ultimo_dia_util ? 'no último dia útil do mês' : `dia ${cartao.dia_fechamento}`;
-    html += `<div class="card">
-      <h2 class="section-title">${escHtml(cartao.nome)}<small>Fecha ${textoFechamento} · vence dia ${cartao.dia_vencimento}${cartao.limite?' · limite '+formatMoeda(cartao.limite):''}</small></h2>`;
-    if(faturasCartao.length===0){
-      html += `<div class="empty">Nenhuma fatura ainda.</div>`;
-    } else {
-      for(const f of faturasCartao){
-        html += `<div class="list-row" data-action="ver-fatura" data-id="${f.id}">
-          <div><div class="name">${nomeMesAno(f.mes_referencia)}</div><div class="sub">Vence ${formatDataBR(f.data_vencimento)}</div></div>
-          <div style="text-align:right;">
-            <div style="font-family:'Fraunces',serif;font-weight:700;">${formatMoeda(f.valor_total)}</div>
-            <span class="tag ${f.status}">${f.status}</span>
-          </div>
-        </div>`;
-      }
+  html += `<div class="card">
+    <div class="mes-nav">
+      <button type="button" id="btnMesAnt" aria-label="Fatura anterior">‹</button>
+      <div class="mn-t">
+        <div class="m">${nomeMesAno(mes)}</div>
+        <div class="s">${state.cartoes.length===1?escHtml(cartao.nome)+' · ':''}<span class="tag ${status}">${status}</span></div>
+      </div>
+      <button type="button" id="btnMesProx" aria-label="Próxima fatura">›</button>
+    </div>
+    ${ehAtual ? '' : `<div style="text-align:center;margin-top:10px;"><button type="button" class="link-btn" id="btnFaturaAtual">Ir para a fatura atual</button></div>`}
+    <div class="fat-resumo">
+      <div class="fr-total">${formatMoeda(total)}</div>
+      <div class="fr-sub">Fecha ${formatDataBR(datas.fechamento)} · vence ${formatDataBR(datas.vencimento)}</div>
+    </div>`;
+  if(itens.length===0){
+    html += `<div class="empty" style="padding:24px 12px;">Nenhum lançamento nesta fatura.</div>`;
+  }
+  for(const {p, compra} of itens){
+    const labelParcela = compra.parcelas_total>1 ? ` (${p.numero_parcela}/${compra.parcelas_total})` : '';
+    html += `<div class="lancamento-item" data-action="editar-compra" data-cartao="${cartao.id}" data-id="${compra.id}">
+      <span class="dot saida"></span>
+      <div class="info">
+        <div class="hist">${escHtml(compra.descricao)}${labelParcela}</div>
+        <div class="meta">${formatDataBR(compra.data_compra)} · ${escHtml(categoriaNome(compra.categoria_id))}</div>
+      </div>
+      <div class="valor saida">${formatMoeda(p.valor_parcela)}</div>
+    </div>`;
+  }
+  if(!paga){
+    html += `<button type="button" class="btn secondary" id="btnNovoLancFatura">+ Lançamento nesta fatura</button>`;
+    if(total>0 && state.contas.length>0){
+      html += `<div class="filters-grid" style="margin-top:6px;">
+        <div><label>Pagar com a conta</label>
+        <select id="selContaPagamento">${state.contas.map(c=>`<option value="${c.id}">${escHtml(c.nome)}</option>`).join('')}</select></div>
+        <div><label>Data do pagamento</label>
+        <input type="date" id="dataPagamento" value="${todayISO()}"></div>
+      </div>
+      <button type="button" class="btn" id="btnPagarFatura">Marcar como paga</button>`;
     }
-    html += `<div class="btn-row">
-      <button class="btn secondary small" data-action="nova-compra-cartao" data-id="${cartao.id}">+ Compra</button>
-      <button class="btn ghost small" data-action="editar-cartao" data-id="${cartao.id}">Editar</button>
-    </div></div>`;
+  } else {
+    html += `<p class="hint-txt" style="text-align:center;margin-top:16px;">Fatura paga. Para alterar, incluir ou excluir lançamentos, reabra a fatura (o pagamento é desfeito).</p>
+      <button type="button" class="btn ghost" id="btnReabrirFatura" style="margin-top:12px;">Reabrir fatura</button>`;
   }
-  html += `<button class="btn secondary" id="btnNovoCartao">+ Novo cartão</button>`;
+  html += `</div>`;
+
+  const textoFechamento = cartao.fechamento_ultimo_dia_util ? 'no último dia útil do mês' : `dia ${cartao.dia_fechamento}`;
+  html += `<div class="card compact">
+    <h2 class="section-title">${escHtml(cartao.nome)}<small>Fecha ${textoFechamento} · vence dia ${cartao.dia_vencimento}${cartao.limite?' · limite '+formatMoeda(cartao.limite):''}</small></h2>
+    <div class="btn-row">
+      <button type="button" class="btn ghost small" id="btnEditarCartao">Editar cartão</button>
+      <button type="button" class="btn secondary small" id="btnNovoCartao">+ Novo cartão</button>
+    </div>
+  </div>`;
   return html;
 }
 function afterRenderCartoes(){
-  document.getElementById('btnNovoCartao').addEventListener('click', ()=>abrirModalCartao(null));
-  document.querySelectorAll('[data-action="editar-cartao"]').forEach(el=>el.addEventListener('click', ()=>abrirModalCartao(el.dataset.id)));
-  document.querySelectorAll('[data-action="nova-compra-cartao"]').forEach(el=>el.addEventListener('click', ()=>abrirModalCompraCartao(el.dataset.id)));
-  document.querySelectorAll('[data-action="ver-fatura"]').forEach(el=>el.addEventListener('click', ()=>abrirModalFatura(el.dataset.id)));
+  const $ = (id)=>document.getElementById(id);
+  const novo = $('btnNovoCartao');
+  if(novo) novo.addEventListener('click', ()=>abrirModalCartao(null));
+  const cartao = state.cartoes.find(c=>c.id===state.faturaCartaoId);
+  if(!cartao) return;
+  $('btnEditarCartao').addEventListener('click', ()=>abrirModalCartao(cartao.id));
+  const sel = $('selCartaoFatura');
+  if(sel) sel.addEventListener('change', ()=>{ state.faturaCartaoId = sel.value; state.faturaMes = null; render(); });
+  $('btnMesAnt').addEventListener('click', ()=>{ state.faturaMes = addMonthsISO(state.faturaMes, -1); render(); });
+  $('btnMesProx').addEventListener('click', ()=>{ state.faturaMes = addMonthsISO(state.faturaMes, 1); render(); });
+  const btnAtual = $('btnFaturaAtual');
+  if(btnAtual) btnAtual.addEventListener('click', ()=>{ state.faturaMes = mesFaturaAtual(cartao); render(); });
+  document.querySelectorAll('[data-action="editar-compra"]').forEach(el=>{
+    el.addEventListener('click', ()=>abrirModalCompraCartao(el.dataset.cartao, el.dataset.id));
+  });
+  const btnNovo = $('btnNovoLancFatura');
+  if(btnNovo) btnNovo.addEventListener('click', ()=>abrirModalCompraCartao(cartao.id, null, dataPadraoNaFatura(cartao, state.faturaMes)));
+  const fatura = faturaDoMes(cartao.id, state.faturaMes);
+  const btnPagar = $('btnPagarFatura');
+  if(btnPagar && fatura) btnPagar.addEventListener('click', async ()=>{
+    btnPagar.disabled = true;
+    try{
+      await pagarFatura(fatura, cartao, $('selContaPagamento').value, $('dataPagamento').value || todayISO());
+      render(); showToast('Fatura paga.');
+    }catch(err){ console.error(err); btnPagar.disabled = false; }
+  });
+  const btnReabrir = $('btnReabrirFatura');
+  if(btnReabrir && fatura) btnReabrir.addEventListener('click', ()=>reabrirFatura(fatura, cartao));
 }
 function abrirModalCartao(id){
   const cartao = id ? state.cartoes.find(c=>c.id===id) : null;
@@ -1416,130 +1661,167 @@ async function removerParcelasDaCompra(compraId){
     await recalcularTotalFatura(fid);
   }
 }
-function abrirModalCompraCartao(cartaoId, compraId){
-  const cartao = state.cartoes.find(c=>c.id===cartaoId);
+function planejarParcelasCompra(cartao, dataCompra, numParcelas, valorTotal){
+  const base = round2(valorTotal/numParcelas);
+  let acumulado = 0;
+  const plano = [];
+  for(let i=1;i<=numParcelas;i++){
+    const valor = i===numParcelas ? round2(valorTotal - acumulado) : base;
+    acumulado = round2(acumulado + valor);
+    plano.push({numero:i, mesRef: calcularMesFatura(cartao, dataCompra, i-1), valor});
+  }
+  return plano;
+}
+let salvandoCompra = false;
+/* Ponto único de gravação de compra no cartão (usado pela tela Lançar e pelo modal da fatura).
+   Retorna {compra, primeiraFatura} ou false se não gravou. */
+async function salvarCompraCartao({cartao, compraExistente, descricao, valorTotal, numParcelas, dataCompra, categoriaId}){
+  if(salvandoCompra) return false;
+  if(compraExistente && compraTravada(compraExistente.id)){
+    showToast('Há parcelas em fatura já paga. Reabra a fatura para alterar esta compra.');
+    return false;
+  }
+  const plano = planejarParcelasCompra(cartao, dataCompra, numParcelas, valorTotal);
+  for(const it of plano){
+    const f = faturaDoMes(cartao.id, it.mesRef);
+    if(f && f.status==='paga'){
+      showToast(`A fatura de ${nomeMesAno(it.mesRef)} já está paga. Reabra-a antes de incluir lançamentos nela.`);
+      return false;
+    }
+  }
+  salvandoCompra = true;
+  try{
+    if(compraExistente) await removerParcelasDaCompra(compraExistente.id);
+    const campos = {
+      cartao_id: cartao.id, categoria_id: categoriaId || null,
+      descricao, valor_total: valorTotal, parcelas_total: numParcelas, data_compra: dataCompra
+    };
+    const compra = compraExistente
+      ? await dbPut('compras_cartao', {id: compraExistente.id, ...campos})
+      : await dbAdd('compras_cartao', campos);
+    const afetadas = new Set();
+    for(const it of plano){
+      const fatura = await garantirFatura(cartao, it.mesRef);
+      const parcela = await dbAdd('parcelas_cartao', {compra_id: compra.id, fatura_id: fatura.id, numero_parcela: it.numero, valor_parcela: it.valor, status:'pendente'});
+      state.parcelasCartao.push(parcela);
+      afetadas.add(fatura.id);
+    }
+    for(const fid of afetadas) await recalcularTotalFatura(fid);
+    await loadAll();
+    return {compra, primeiraFatura: plano[0].mesRef};
+  }catch(err){
+    console.error(err);
+    await loadAll();
+    return false;
+  }finally{
+    salvandoCompra = false;
+  }
+}
+function abrirModalCompraCartao(cartaoId, compraId, dataInicial){
   const compraExistente = compraId ? state.compras.find(c=>c.id===compraId) : null;
+  if(compraExistente && compraTravada(compraExistente.id)){
+    showToast('Há parcelas em fatura já paga. Reabra a fatura para alterar esta compra.');
+    return;
+  }
+  const cartaoAtual = state.cartoes.find(c=>c.id===cartaoId) || state.cartoes[0];
+  if(!cartaoAtual) return;
   const categoriasDespesa = state.categorias.filter(c=>c.tipo==='despesa');
   document.getElementById('modalRoot').innerHTML = `<div class="modal-overlay" id="modalOverlay">
     <div class="modal">
-      <h3>${compraExistente?'Editar compra':'Nova compra'} — ${escHtml(cartao.nome)}</h3>
+      <h3>${compraExistente?'Editar lançamento':'Novo lançamento'} no cartão</h3>
       <form id="formCompraCartao">
+        ${state.cartoes.length>1
+          ? `<label>Cartão</label><select name="cartao">${state.cartoes.map(c=>`<option value="${c.id}" ${c.id===cartaoAtual.id?'selected':''}>${escHtml(c.nome)}</option>`).join('')}</select>`
+          : `<input type="hidden" name="cartao" value="${cartaoAtual.id}">`}
         <label>Descrição</label>
         <input type="text" name="descricao" required value="${compraExistente?escHtml(compraExistente.descricao):''}">
         <div class="filters-grid">
           <div><label>Valor total</label>
           <input type="text" name="valor" inputmode="decimal" required placeholder="0,00" value="${compraExistente?String(compraExistente.valor_total).replace('.',','):''}"></div>
           <div><label>Parcelas</label>
-          <input type="number" name="parcelas" min="1" value="${compraExistente?compraExistente.parcelas_total:1}" required></div>
+          <input type="number" name="parcelas" min="1" max="72" value="${compraExistente?compraExistente.parcelas_total:1}" required></div>
         </div>
         <label>Categoria</label>
         <select name="categoria">${categoriasDespesa.map(c=>`<option value="${c.id}" ${compraExistente&&compraExistente.categoria_id===c.id?'selected':''}>${escHtml(c.nome)}</option>`).join('')}</select>
         <label>Data da compra</label>
-        <input type="date" name="data" value="${compraExistente?compraExistente.data_compra:todayISO()}" required>
-        ${compraExistente ? '<p class="note">Editar recalcula as parcelas e os valores das faturas envolvidas.</p>' : ''}
+        <input type="date" name="data" value="${compraExistente?compraExistente.data_compra:(dataInicial||todayISO())}" required>
+        <p class="note" id="hintFaturaModal"></p>
+        ${compraExistente ? '<p class="note">Editar recalcula todas as parcelas e os valores das faturas envolvidas.</p>' : ''}
         <div class="btn-row">
           ${compraExistente?'<button type="button" class="btn danger small" id="btnExcluirCompra">Excluir</button>':''}
-          <button type="submit" class="btn small" style="flex:1;">${compraExistente?'Salvar alterações':'Salvar compra'}</button>
+          <button type="submit" class="btn small" style="flex:1;">${compraExistente?'Salvar alterações':'Salvar lançamento'}</button>
         </div>
       </form>
     </div>
   </div>`;
   document.getElementById('modalOverlay').addEventListener('click', (e)=>{ if(e.target.id==='modalOverlay') fecharModal(); });
-  document.getElementById('formCompraCartao').addEventListener('submit', async (e)=>{
+  const form = document.getElementById('formCompraCartao');
+  const atualizarHint = ()=>{
+    const fd = new FormData(form);
+    const c = state.cartoes.find(x=>x.id===fd.get('cartao'));
+    document.getElementById('hintFaturaModal').textContent = infoFaturaDaCompra(c, fd.get('data'), Math.max(1, parseInt(fd.get('parcelas'),10)||1), parseValor(fd.get('valor')));
+  };
+  form.addEventListener('input', atualizarHint);
+  form.addEventListener('change', atualizarHint);
+  atualizarHint();
+
+  form.addEventListener('submit', async (e)=>{
     e.preventDefault();
-    const fd = new FormData(e.target);
+    const fd = new FormData(form);
+    const cartao = state.cartoes.find(c=>c.id===fd.get('cartao'));
     const valorTotal = parseValor(fd.get('valor'));
-    const numParcelas = Number(fd.get('parcelas'));
-    const dataCompra = fd.get('data');
-    if(valorTotal<=0 || numParcelas<1){ showToast('Confira os valores.'); return; }
-
-    let compra;
-    if(compraExistente){
-      await removerParcelasDaCompra(compraExistente.id);
-      compra = await dbPut('compras_cartao', {
-        id: compraExistente.id, cartao_id: cartaoId, categoria_id: fd.get('categoria') || null,
-        descricao: fd.get('descricao'), valor_total: valorTotal,
-        parcelas_total: numParcelas, data_compra: dataCompra
-      });
-    } else {
-      compra = await dbAdd('compras_cartao', {
-        cartao_id: cartaoId, categoria_id: fd.get('categoria') || null,
-        descricao: fd.get('descricao'), valor_total: valorTotal,
-        parcelas_total: numParcelas, data_compra: dataCompra
-      });
-    }
-
-    const valorParcelaBase = round2(valorTotal/numParcelas);
-    let somaAcumulada = 0;
-    const faturasAfetadas = new Set();
-    for(let i=1;i<=numParcelas;i++){
-      const mesRef = calcularMesFatura(cartao, dataCompra, i-1);
-      const fatura = await garantirFatura(cartao, mesRef);
-      const valorParcela = i===numParcelas ? round2(valorTotal - somaAcumulada) : valorParcelaBase;
-      somaAcumulada += valorParcela;
-      const parcela = await dbAdd('parcelas_cartao', {compra_id: compra.id, fatura_id: fatura.id, numero_parcela:i, valor_parcela: valorParcela, status:'pendente'});
-      state.parcelasCartao.push(parcela);
-      faturasAfetadas.add(fatura.id);
-    }
-    for(const fid of faturasAfetadas){
-      await recalcularTotalFatura(fid);
-    }
-    await loadAll();
-    fecharModal(); render(); showToast(compraExistente?'Compra atualizada.':'Compra registrada.');
+    const numParcelas = parseInt(fd.get('parcelas'),10);
+    if(!cartao || valorTotal<=0 || !(numParcelas>=1)){ showToast('Confira os valores.'); return; }
+    const res = await salvarCompraCartao({
+      cartao, compraExistente, descricao: fd.get('descricao'), valorTotal, numParcelas,
+      dataCompra: fd.get('data'), categoriaId: fd.get('categoria') || null
+    });
+    if(!res) return;
+    fecharModal(); render();
+    showToast(`${compraExistente?'Lançamento atualizado':'Lançamento salvo'} · fatura de ${nomeMesAno(res.primeiraFatura)}.`);
   });
   if(compraExistente){
     document.getElementById('btnExcluirCompra').addEventListener('click', async ()=>{
-      if(!confirm('Excluir esta compra e todas as suas parcelas?')) return;
-      await removerParcelasDaCompra(compraExistente.id);
-      await dbDelete('compras_cartao', compraExistente.id);
+      if(!confirm('Excluir este lançamento e todas as suas parcelas?')) return;
+      try{
+        await removerParcelasDaCompra(compraExistente.id);
+        await dbDelete('compras_cartao', compraExistente.id);
+      }catch(err){ console.error(err); }
       await loadAll();
-      fecharModal(); render(); showToast('Compra excluída.');
+      fecharModal(); render(); showToast('Lançamento excluído.');
     });
   }
 }
-function abrirModalFatura(faturaId){
-  const fatura = state.faturas.find(f=>f.id===faturaId);
-  const cartao = state.cartoes.find(c=>c.id===fatura.cartao_id);
-  const parcelas = state.parcelasCartao.filter(p=>p.fatura_id===faturaId);
-  let itensHtml = '';
-  for(const p of parcelas){
-    const compra = state.compras.find(c=>c.id===p.compra_id);
-    const clique = (fatura.status!=='paga' && compra) ? ` data-action="editar-compra" data-id="${compra.id}" style="cursor:pointer;"` : '';
-    itensHtml += `<div class="summary-row"${clique}><span>${escHtml(compra?compra.descricao:'')} (${p.numero_parcela}/${compra?compra.parcelas_total:''})</span><span>${formatMoeda(p.valor_parcela)}</span></div>`;
-  }
-  document.getElementById('modalRoot').innerHTML = `<div class="modal-overlay" id="modalOverlay">
-    <div class="modal">
-      <h3>Fatura ${escHtml(cartao.nome)} — ${nomeMesAno(fatura.mes_referencia)}</h3>
-      <p class="note">Vencimento ${formatDataBR(fatura.data_vencimento)} · Status: <span class="tag ${fatura.status}">${fatura.status}</span></p>
-      <div style="margin-top:10px;">${itensHtml || '<div class="empty">Sem itens.</div>'}</div>
-      <div class="summary-row bold"><span>Total</span><span>${formatMoeda(fatura.valor_total)}</span></div>
-      ${fatura.status!=='paga' ? `
-      <label>Pagar com a conta</label>
-      <select id="selectContaPagamento">${state.contas.map(c=>`<option value="${c.id}">${escHtml(c.nome)}</option>`).join('')}</select>
-      <button class="btn" id="btnPagarFatura">Marcar como paga</button>` : ''}
-    </div>
-  </div>`;
-  document.getElementById('modalOverlay').addEventListener('click', (e)=>{ if(e.target.id==='modalOverlay') fecharModal(); });
-  document.querySelectorAll('[data-action="editar-compra"]').forEach(el=>{
-    el.addEventListener('click', ()=>abrirModalCompraCartao(cartao.id, el.dataset.id));
+async function pagarFatura(fatura, cartao, contaId, dataPagamento){
+  const total = totalDaFatura(fatura);
+  if(total<=0) return;
+  const parcelas = state.parcelasCartao.filter(p=>p.fatura_id===fatura.id);
+  /* transfer_group = id da fatura: liga o pagamento à fatura (para reabrir) e o tira dos gráficos, que já contam as compras */
+  await dbAdd('lancamentos', {
+    conta_financeira_id: contaId, categoria_id: null, tipo:'despesa',
+    valor: total, data: dataPagamento,
+    descricao: `Fatura ${cartao.nome} — ${nomeMesAno(fatura.mes_referencia)}`,
+    transfer_group: fatura.id
   });
-  const btnPagar = document.getElementById('btnPagarFatura');
-  if(btnPagar){
-    btnPagar.addEventListener('click', async ()=>{
-      const contaId = document.getElementById('selectContaPagamento').value;
-      await dbAdd('lancamentos', {
-        conta_financeira_id: contaId, categoria_id: null, tipo:'despesa',
-        valor: fatura.valor_total, data: todayISO(),
-        descricao: `Fatura ${cartao.nome} — ${nomeMesAno(fatura.mes_referencia)}`
-      });
-      await dbPut('faturas_cartao', {id: fatura.id, status:'paga'});
-      for(const p of parcelas){
-        await dbPut('parcelas_cartao', {id: p.id, status:'paga'});
-      }
-      await loadAll();
-      fecharModal(); render(); showToast('Fatura paga.');
-    });
-  }
+  await dbPut('faturas_cartao', {id: fatura.id, status:'paga', valor_total: total});
+  for(const p of parcelas) await dbPut('parcelas_cartao', {id: p.id, status:'paga'});
+  await loadAll();
+}
+async function reabrirFatura(fatura, cartao){
+  const nomeEsperado = `Fatura ${cartao.nome} — ${nomeMesAno(fatura.mes_referencia)}`;
+  let pag = state.lancamentos.find(l=>l.transfer_group===fatura.id);
+  if(!pag) pag = state.lancamentos.find(l=>l.tipo==='despesa' && !l.categoria_id && !l.transfer_group && l.descricao===nomeEsperado);
+  const msg = pag
+    ? `Reabrir esta fatura exclui o lançamento do pagamento (${formatMoeda(pag.valor)} em ${formatDataBR(pag.data)}) e devolve o valor à conta. Continuar?`
+    : 'Não encontrei o lançamento do pagamento desta fatura. Reabrir mesmo assim? O saldo da conta não será alterado.';
+  if(!confirm(msg)) return;
+  try{
+    if(pag) await dbDelete('lancamentos', pag.id);
+    await dbPut('faturas_cartao', {id: fatura.id, status:'aberta'});
+    for(const p of state.parcelasCartao.filter(x=>x.fatura_id===fatura.id)) await dbPut('parcelas_cartao', {id: p.id, status:'pendente'});
+  }catch(err){ console.error(err); }
+  await loadAll();
+  render(); showToast('Fatura reaberta.');
 }
 
 /* ============ INVESTIMENTOS ============ */
@@ -1840,6 +2122,7 @@ function renderRelatorios(){
       <select name="conta"><option value="">Todas</option>${state.contas.map(c=>`<option value="${c.id}" ${f.conta===c.id?'selected':''}>${escHtml(c.nome)}</option>`).join('')}</select>
       <button type="submit" class="btn">Gerar relatório</button>
     </form>
+    <p class="hint-txt">Em "Todas", as despesas no cartão entram por parcela e o pagamento da fatura não é somado. Ao filtrar uma conta, você vê o extrato dela (com o pagamento da fatura).</p>
   </div>`;
 
   if(state.reportResult){
@@ -1861,7 +2144,7 @@ function renderRelatorios(){
       <h2 class="section-title">Lançamentos</h2>
       <div class="table-wrap"><table class="report">
         <thead><tr><th>Data</th><th>Descrição</th><th>Categoria</th><th>Conta</th><th class="num">Valor</th></tr></thead>
-        <tbody>${r.lancamentos.map(l=>`<tr><td>${formatDataBR(l.data)}</td><td>${escHtml(l.descricao||'')}</td><td>${escHtml(categoriaNome(l.categoria_id))}</td><td>${escHtml(contaNome(l.conta_financeira_id))}</td><td class="num" style="color:${l.tipo==='despesa'?'var(--saida)':'var(--accent-ink)'}">${l.tipo==='despesa'?'-':'+'} ${formatMoeda(l.valor)}</td></tr>`).join('')}</tbody>
+        <tbody>${r.lancamentos.map(l=>`<tr><td>${formatDataBR(l.data)}</td><td>${escHtml(l.descricao||'')}</td><td>${escHtml(categoriaNome(l.categoria_id))}</td><td>${escHtml(origemLancamento(l))}</td><td class="num" style="color:${l.tipo==='despesa'?'var(--saida)':'var(--accent-ink)'}">${l.tipo==='despesa'?'-':'+'} ${formatMoeda(l.valor)}</td></tr>`).join('')}</tbody>
       </table></div>
       <div class="btn-row">
         <button class="btn secondary small" id="btnExportarCSV">Exportar CSV</button>
@@ -1877,11 +2160,13 @@ function afterRenderRelatorios(){
     const fd = new FormData(e.target);
     const filtros = {de: fd.get('de'), ate: fd.get('ate'), conta: fd.get('conta')};
     state.reportFilters = filtros;
-    const lancamentosFiltrados = state.lancamentos.filter(l=>{
+    const base = state.lancamentos.filter(l=>{
       if(l.data < filtros.de || l.data > filtros.ate) return false;
-      if(filtros.conta && l.conta_financeira_id !== filtros.conta) return false;
-      return true;
-    }).sort((a,b)=>a.data.localeCompare(b.data));
+      if(filtros.conta) return l.conta_financeira_id === filtros.conta;
+      return !ehPagamentoFatura(l);
+    });
+    const doCartao = filtros.conta ? [] : parcelasCartaoComoLancamentos().filter(l=>l.data >= filtros.de && l.data <= filtros.ate);
+    const lancamentosFiltrados = [...base, ...doCartao].sort((a,b)=>a.data.localeCompare(b.data));
     const totalReceitas = round2(lancamentosFiltrados.filter(l=>l.tipo==='receita').reduce((a,l)=>a+Number(l.valor),0));
     const totalDespesas = round2(lancamentosFiltrados.filter(l=>l.tipo==='despesa').reduce((a,l)=>a+Number(l.valor),0));
     state.reportResult = {lancamentos: lancamentosFiltrados, totalReceitas, totalDespesas};
@@ -1891,7 +2176,7 @@ function afterRenderRelatorios(){
   if(btnCsv) btnCsv.addEventListener('click', ()=>{
     const r = state.reportResult;
     const rows = [['Data','Descrição','Categoria','Conta','Tipo','Valor']];
-    for(const l of r.lancamentos) rows.push([formatDataBR(l.data), l.descricao||'', categoriaNome(l.categoria_id), contaNome(l.conta_financeira_id), l.tipo, String(l.valor).replace('.',',')]);
+    for(const l of r.lancamentos) rows.push([formatDataBR(l.data), l.descricao||'', categoriaNome(l.categoria_id), origemLancamento(l), l.tipo, String(l.valor).replace('.',',')]);
     downloadFile(toCSV(rows), `relatorio_${todayISO()}.csv`, 'text/csv;charset=utf-8;');
   });
   const btnPdf = document.getElementById('btnExportarPDF');
@@ -1903,7 +2188,7 @@ function afterRenderRelatorios(){
     doc.autoTable({
       startY: 28,
       head: [['Data','Descrição','Categoria','Conta','Valor']],
-      body: r.lancamentos.map(l=>[formatDataBR(l.data), l.descricao||'', categoriaNome(l.categoria_id), contaNome(l.conta_financeira_id), (l.tipo==='despesa'?'-':'+')+' '+formatMoeda(l.valor)]),
+      body: r.lancamentos.map(l=>[formatDataBR(l.data), l.descricao||'', categoriaNome(l.categoria_id), origemLancamento(l), (l.tipo==='despesa'?'-':'+')+' '+formatMoeda(l.valor)]),
       styles:{fontSize:8}
     });
     doc.save(`relatorio_${todayISO()}.pdf`);
@@ -2080,7 +2365,8 @@ function afterRender(){
       renderizarChartGastosCategoria();
       const banner = document.getElementById('bannerDefinirSaldos');
       if(banner) banner.addEventListener('click', ()=>{ state.onboardingSaldos = true; render(); });
-      document.querySelectorAll('[data-action="ver-fatura"]').forEach(el=>el.addEventListener('click', ()=>abrirModalFatura(el.dataset.id)));
+      document.querySelectorAll('[data-action="ver-fatura"]').forEach(el=>el.addEventListener('click', ()=>irParaFatura(el.dataset.id)));
+      document.querySelectorAll('[data-action="editar-compra"]').forEach(el=>el.addEventListener('click', ()=>abrirModalCompraCartao(el.dataset.cartao, el.dataset.id)));
       break;
     case 'lancar': afterRenderLancar(); break;
     case 'cartoes': afterRenderCartoes(); break;
